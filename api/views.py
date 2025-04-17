@@ -10,6 +10,11 @@ from verification.utils import generate_verification_code as generate_sms_code, 
 from django.utils import timezone
 from .authentication import ApiKeyAuthentication
 from .throttling import CompanyAnonRateThrottle, CompanyUserRateThrottle
+from rest_framework.permissions import AllowAny, IsAuthenticated
+from .authentication import ApiKeyAuthentication, TokenAuthentication
+from .models import AuthToken
+from .db_handlers import authenticate_user, get_user_by_id
+
 from rest_framework.permissions import AllowAny
 import logging
 
@@ -501,4 +506,137 @@ class ResendVerificationAPIView(APIView):
             
         except Exception as e:
             logger.error(f"Unexpected error in resend-verification API: {str(e)}", exc_info=True)
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
+        
+class LoginAPIView(APIView):
+    """
+    API endpoint for user login
+    """
+    authentication_classes = [ApiKeyAuthentication]
+    permission_classes = [AllowAny]
+    throttle_classes = [CompanyAnonRateThrottle]
+    
+    def post(self, request):
+        try:
+            # Get company ID from request headers
+            company_id = request.headers.get('X-Company-ID')
+            if not company_id:
+                return Response({"error": "X-Company-ID header is required"}, status=status.HTTP_400_BAD_REQUEST)
+            
+            try:
+                # Find company by ID
+                company = Company.objects.get(id=company_id)
+            except Company.DoesNotExist:
+                return Response({"error": "Company not found"}, status=status.HTTP_404_NOT_FOUND)
+            
+            # Get login credentials
+            data = request.data
+            
+            # Check if required fields are present
+            if 'password' not in data:
+                return Response({"error": "Password is required"}, status=status.HTTP_400_BAD_REQUEST)
+                
+            # Determine identifier field (email or phone)
+            identifier_field = None
+            identifier_value = None
+            
+            if 'email' in data and data['email']:
+                identifier_field = 'email'
+                identifier_value = data['email']
+            elif 'phone' in data and data['phone']:
+                identifier_field = 'phone'
+                identifier_value = data['phone']
+            else:
+                return Response({"error": "Email or phone is required"}, status=status.HTTP_400_BAD_REQUEST)
+                
+            # Authenticate user
+            user = authenticate_user(company, identifier_field, identifier_value, data['password'])
+            
+            if not user:
+                return Response({"error": "Invalid credentials"}, status=status.HTTP_401_UNAUTHORIZED)
+                
+            # Get user ID
+            user_id = user[company.user_table_primary_key or 'id']
+            
+            # Generate token
+            token_obj = AuthToken.generate_token(company, user_id)
+            
+            # Return token and user data
+            return Response({
+                "token": token_obj.token,
+                "expires_at": token_obj.expires_at,
+                "user": {k: v for k, v in user.items() if k != 'password'}  # Exclude password from response
+            })
+            
+        except Exception as e:
+            logging.error(f"Unexpected error in login API: {str(e)}", exc_info=True)
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+class LogoutAPIView(APIView):
+    """
+    API endpoint for user logout
+    """
+    authentication_classes = [ApiKeyAuthentication, TokenAuthentication]
+    permission_classes = [IsAuthenticated]
+    
+    def post(self, request):
+        try:
+            # Get token from request
+            auth_header = request.headers.get('Authorization')
+            if not auth_header:
+                return Response({"error": "Authorization header is required"}, status=status.HTTP_400_BAD_REQUEST)
+                
+            # Check if the header starts with 'Token '
+            parts = auth_header.split()
+            if parts[0].lower() != 'token' or len(parts) != 2:
+                return Response({"error": "Invalid Authorization header format"}, status=status.HTTP_400_BAD_REQUEST)
+                
+            token = parts[1]
+            
+            # Get company ID from request headers
+            company_id = request.headers.get('X-Company-ID')
+            if not company_id:
+                return Response({"error": "X-Company-ID header is required"}, status=status.HTTP_400_BAD_REQUEST)
+                
+            try:
+                # Find company by ID
+                company = Company.objects.get(id=company_id)
+            except Company.DoesNotExist:
+                return Response({"error": "Company not found"}, status=status.HTTP_404_NOT_FOUND)
+                
+            # Deactivate token
+            try:
+                token_obj = AuthToken.objects.get(token=token, company=company)
+                token_obj.is_active = False
+                token_obj.save()
+                
+                return Response({"message": "Successfully logged out"})
+                
+            except AuthToken.DoesNotExist:
+                return Response({"error": "Invalid token"}, status=status.HTTP_400_BAD_REQUEST)
+                
+        except Exception as e:
+            logging.error(f"Unexpected error in logout API: {str(e)}", exc_info=True)
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+class UserProfileAPIView(APIView):
+    """
+    API endpoint for getting user profile
+    """
+    authentication_classes = [ApiKeyAuthentication, TokenAuthentication]
+    permission_classes = [IsAuthenticated]
+    
+    def get(self, request):
+        try:
+            # User is already authenticated by TokenAuthentication
+            user = request.user
+            
+            # Return user data (excluding password)
+            return Response({
+                "user": {k: v for k, v in user.items() if k != 'password'}
+            })
+            
+        except Exception as e:
+            logging.error(f"Unexpected error in user profile API: {str(e)}", exc_info=True)
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

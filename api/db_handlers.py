@@ -5,6 +5,12 @@ import sqlite3
 import json
 import hashlib
 import bcrypt
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+
 
 def get_db_connection(company):
     """Get a database connection based on company configuration"""
@@ -424,4 +430,109 @@ def update_user_password(company, user, new_password):
     finally:
         # Close connection
         if db_type != 'mongodb':
+            conn.close()
+
+
+def authenticate_user(company, identifier_field, identifier_value, password):
+    """
+    Authenticate a user by checking their credentials
+    
+    Args:
+        company: Company model instance
+        identifier_field: Field to identify the user (email or phone)
+        identifier_value: Value of the identifier field
+        password: Plain text password to check
+        
+    Returns:
+        dict: User data if authentication is successful, None otherwise
+    """
+    try:
+        # Get database connection
+        conn = get_db_connection(company)
+        cursor = conn.cursor(dictionary=True)
+        
+        # Get table name and fields
+        table_name = company.user_table_name
+        
+        # Escape table name to prevent SQL injection
+        table_name = conn.converter.escape(table_name)
+        
+        # Escape identifier field to prevent SQL injection
+        identifier_field = conn.converter.escape(identifier_field)
+        
+        # Query to find the user
+        query = f"SELECT * FROM {table_name} WHERE {identifier_field} = %s LIMIT 1"
+        cursor.execute(query, (identifier_value,))
+        
+        user = cursor.fetchone()
+        
+        if not user:
+            return None
+            
+        # Check if password field exists
+        if 'password' not in user:
+            return None
+            
+        # Check if password matches
+        stored_password = user['password']
+        
+        # Check if the stored password is already a bcrypt hash
+        if stored_password.startswith('$2b$') or stored_password.startswith('$2a$') or stored_password.startswith('$2y$'):
+            # Verify the password using bcrypt
+            if bcrypt.checkpw(password.encode('utf-8'), stored_password.encode('utf-8')):
+                return user
+        else:
+            # If not using bcrypt, do a direct comparison (not recommended but for compatibility)
+            if password == stored_password:
+                return user
+                
+        return None
+        
+    except Exception as e:
+        logger.error(f"Error authenticating user: {str(e)}")
+        return None
+    finally:
+        if 'conn' in locals() and conn:
+            conn.close()
+
+def get_user_by_id(company, user_id):
+    """
+    Get a user by their ID
+    
+    Args:
+        company: Company model instance
+        user_id: ID of the user to retrieve
+        
+    Returns:
+        dict: User data if found, None otherwise
+    """
+    try:
+        # Get database connection
+        conn = get_db_connection(company)
+        cursor = conn.cursor(dictionary=True)
+        
+        # Get table name
+        table_name = company.user_table_name
+        
+        # Escape table name to prevent SQL injection
+        table_name = conn.converter.escape(table_name)
+        
+        # Get primary key field
+        primary_key = company.user_table_primary_key or 'id'
+        
+        # Escape primary key field to prevent SQL injection
+        primary_key = conn.converter.escape(primary_key)
+        
+        # Query to find the user
+        query = f"SELECT * FROM {table_name} WHERE {primary_key} = %s LIMIT 1"
+        cursor.execute(query, (user_id,))
+        
+        user = cursor.fetchone()
+        return user
+        
+    except Exception as e:
+        logger.error(f"Error getting user by ID: {str(e)}")
+        return None
+    finally:
+        if 'conn' in locals() and conn:
             conn.close()
